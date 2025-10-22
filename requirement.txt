@@ -1,0 +1,33 @@
+# Core Dependencies
+uagents>=0.12.0
+uagents-core>=0.1.0
+requests>=2.31.0
+
+# LangChain Integration (Optional but Recommended)
+langchain>=0.1.0
+langchain-community>=0.0.20
+openai>=1.12.0
+tiktoken>=0.5.2
+
+# Vector Store for RAG
+faiss-cpu>=1.7.4
+chromadb>=0.4.22
+
+# MeTTa Integration (Optional)
+# Note: MeTTa installation is platform-specific
+# See: https://github.com/trueagi-io/hyperon-experimental
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+
+# Logging
+colorlog>=6.7.0
