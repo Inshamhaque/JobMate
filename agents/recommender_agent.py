@@ -8,6 +8,7 @@ from datetime import datetime
 from uuid import uuid4
 from uagents import Agent, Context, Model, Protocol
 from config.agent_addresses import TEST_AGENT_ADDRESS
+from agents.models import RecommendationReport
 
 # Try to import chat protocol components
 try:
@@ -36,10 +37,6 @@ class MatchScore(Model):
     location: str
     remote: bool
 
-class RecommendationReport(Model):
-    candidate_id: str
-    report: str
-    top_matches: list
 
 # Initialize Agent
 recommender_agent = Agent(

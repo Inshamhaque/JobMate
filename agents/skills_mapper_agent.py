@@ -1,14 +1,8 @@
 from uagents import Agent, Context, Model
 import os
 from config.agent_addresses import JOB_DISCOVERY_ADDRESS
+from agents.models import CandidateProfile
 # Data Models
-class CandidateProfile(Model):
-    candidate_id: str
-    resume_text: str
-    skills: list
-    experience_years: int
-    preferences: dict
-
 class EnrichedSkillsProfile(Model):
     candidate_id: str
     original_skills: list
