@@ -36,6 +36,7 @@ class MatchScore(Model):
     salary_range: str
     location: str
     remote: bool
+    source_url: str 
 
 
 # Initialize Agent
@@ -68,6 +69,10 @@ def generate_learning_path(skill_gaps: list) -> str:
         "django": "📚 Django Documentation, Two Scoops of Django book",
         "node.js": "📚 Node.js Documentation, You Don't Know Node",
         "mongodb": "📚 MongoDB University, MongoDB Certified Developer",
+        "golang": "📚 Go by Example, A Tour of Go",
+        "rust": "📚 The Rust Book, Rustlings exercises",
+        "graphql": "📚 GraphQL.org tutorials, How to GraphQL",
+        "redis": "📚 Redis University, Redis Certified Developer",
     }
     
     path = "\n🎓 **Recommended Learning Path:**\n"
@@ -87,7 +92,7 @@ def create_recommendation_report(matches: list) -> str:
     
     # Sort by score
     matches.sort(key=lambda x: x.match_score, reverse=True)
-    top_matches = matches[:3]
+    top_matches = matches[:5]  # Show top 5 instead of 3
     
     report = "\n" + "="*70 + "\n"
     report += "🎯 **YOUR TOP JOB MATCHES**\n"
@@ -98,15 +103,16 @@ def create_recommendation_report(matches: list) -> str:
         report += f"📊 Match Score: {match.match_score:.1f}%\n"
         report += f"💰 Salary: {match.salary_range}\n"
         report += f"📍 Location: {match.location}\n"
-        report += f"🏠 Remote: {'Yes' if match.remote else 'No'}\n\n"
+        report += f"🏠 Remote: {'Yes ✅' if match.remote else 'No ❌'}\n"
+        report += f"🔗 Apply: {match.source_url}\n\n"
         
         if match.strengths:
             report += f"✅ **Your Strengths:**\n"
-            report += f"   {', '.join(match.strengths)}\n\n"
+            report += f"   {', '.join(match.strengths[:5])}\n\n"
         
         if match.skill_gaps:
             report += f"⚠️  **Skills to Develop:**\n"
-            report += f"   {', '.join(match.skill_gaps)}\n"
+            report += f"   {', '.join(match.skill_gaps[:5])}\n"
             report += generate_learning_path(match.skill_gaps)
         
         report += "\n" + "-"*70 + "\n\n"
@@ -118,9 +124,15 @@ def create_recommendation_report(matches: list) -> str:
     if avg_score >= 80:
         report += "🌟 Excellent profile! Apply to these positions with confidence.\n"
     elif avg_score >= 60:
-        report += "💪 Strong profile! Consider upskilling in gap areas.\n"
+        report += "💪 Strong profile! Consider upskilling in gap areas to reach 80%+.\n"
     else:
-        report += "📚 Focus on developing high-demand skills.\n"
+        report += "📚 Focus on developing high-demand skills to improve match scores.\n"
+    
+    report += f"\n📊 **Statistics:**\n"
+    report += f"   - Total jobs analyzed: {len(matches)}\n"
+    report += f"   - Top 5 shown above\n"
+    report += f"   - Average match score: {avg_score:.1f}%\n"
+    report += f"   - Remote jobs: {sum(1 for m in matches if m.remote)}/{len(matches)}\n"
     
     report += "\n" + "="*70 + "\n"
     
@@ -187,6 +199,7 @@ async def aggregate_recommendations(ctx: Context, sender: str, msg: MatchScore):
     ctx.logger.info(f"Job: {msg.title} at {msg.company}")
     ctx.logger.info(f"Score: {msg.match_score:.1f}%")
     ctx.logger.info(f"Candidate: {msg.candidate_id}")
+    ctx.logger.info(f"Apply Link: {msg.source_url[:50]}...")
     
     # Store recommendation
     if msg.candidate_id not in candidate_recommendations:
@@ -196,8 +209,9 @@ async def aggregate_recommendations(ctx: Context, sender: str, msg: MatchScore):
     num_recommendations = len(candidate_recommendations[msg.candidate_id])
     ctx.logger.info(f"📊 Total recommendations collected: {num_recommendations}")
     
-    # After receiving 3+ recommendations, generate report
-    if num_recommendations >= 3:
+    # After receiving 5+ recommendations, generate report
+    # (Changed from 3 to 5 to match optimized job discovery limit)
+    if num_recommendations >= 5:
         ctx.logger.info("\n" + "="*70)
         ctx.logger.info("✅ GENERATING FINAL REPORT")
         ctx.logger.info("="*70)
@@ -210,8 +224,7 @@ async def aggregate_recommendations(ctx: Context, sender: str, msg: MatchScore):
         # Log the report
         ctx.logger.info("\n" + report)
         
-        # Try to send via Chat Protocol if available
-# Try Chat Protocol first (for ASI:One)
+        # Try Chat Protocol first (for ASI:One)
         if CHAT_AVAILABLE:
             try:
                 response = create_text_chat(report)
@@ -227,28 +240,19 @@ async def aggregate_recommendations(ctx: Context, sender: str, msg: MatchScore):
                 RecommendationReport(
                     candidate_id=msg.candidate_id,
                     report=report,
-                    top_matches=[m.job_id for m in candidate_recommendations[msg.candidate_id][:3]]
+                    top_matches=[m.job_id for m in candidate_recommendations[msg.candidate_id][:5]]
                 )
             )
             ctx.logger.info(f"📤 Report also sent to test agent: {TEST_AGENT_ADDRESS}")
         except Exception as e:
             ctx.logger.warning(f"⚠️ Could not send report to test agent: {e}")
-
-
-        else:
-            # Send as basic model
-            await ctx.send(
-                msg.candidate_id,
-                RecommendationReport(
-                    candidate_id=msg.candidate_id,
-                    report=report,
-                    top_matches=[m.job_id for m in candidate_recommendations[msg.candidate_id][:3]]
-                )
-            )
         
         # Clear stored recommendations
         del candidate_recommendations[msg.candidate_id]
         ctx.logger.info("🧹 Recommendations cleared for candidate")
+        ctx.logger.info("="*70 + "\n")
+    else:
+        ctx.logger.info(f"⏳ Waiting for more recommendations ({num_recommendations}/5)")
         ctx.logger.info("="*70 + "\n")
 
 # ============================================================================
@@ -264,6 +268,7 @@ async def startup(ctx: Context):
     ctx.logger.info(f"📍 Agent Address: {ctx.agent.address}")
     ctx.logger.info(f"🔌 Port: 8005")
     ctx.logger.info(f"💬 Chat Protocol: {'ENABLED' if CHAT_AVAILABLE else 'DISABLED'}")
+    ctx.logger.info(f"🎯 Minimum recommendations before report: 5")
     ctx.logger.info(f"🎯 Ready to aggregate recommendations!")
     ctx.logger.info("="*70 + "\n")
 
