@@ -19,7 +19,7 @@ try:
     SEARCH_AVAILABLE = True
 except ImportError:
     SEARCH_AVAILABLE = False
-    print("⚠️  LangChain not available - using fallback resources")
+    print("LangChain not available - using fallback resources")
 
 # Chat protocol imports
 try:
