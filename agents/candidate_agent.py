@@ -1,324 +1,266 @@
-"""
-Agent 1: Candidate Profile Agent (UPGRADED)
-Receives candidate resumes (PDF or text), extracts skills, experience, and project skills
-Chat Protocol enabled for ASI:One integration
-"""
-
 from datetime import datetime
 from uuid import uuid4
 from uagents import Agent, Context, Protocol
 import re
-import io
-import base64
-from config.agent_addresses import SKILLS_MAPPER_ADDRESS
+from models import CandidateProfile, RecommendationReport
 
-# Import shared models
-from agents.models import PDFResume, CandidateProfile
-
-# PDF parsing library
-from PyPDF2 import PdfReader
-
-# Try to import chat protocol components
-try:
-    from uagents_core.contrib.protocols.chat import (
-        ChatAcknowledgement,
-        ChatMessage,
-        TextContent,
-        StartSessionContent,
-        EndSessionContent,
-        chat_protocol_spec,
-    )
-    CHAT_AVAILABLE = True
-except ImportError:
-    CHAT_AVAILABLE = False
-    print("⚠️  Chat protocol not available - running in basic mode")
-
-# ============================================================================
-# AGENT INITIALIZATION
-# ============================================================================
-
-candidate_agent = Agent(
-    name="Candidate Profile Agent",
-    port=8001,
-    seed="candidate_agent_seed_unique_123456",
-    endpoint=["http://localhost:8001/submit"]
+from uagents_core.contrib.protocols.chat import (
+    ChatAcknowledgement,
+    ChatMessage,
+    TextContent,
+    EndSessionContent,
+    chat_protocol_spec,
 )
 
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
+# 🔗 Replace this with the actual Job Discovery agent address
+JOB_DISCOVERY_ADDRESS = "agent1qd8vlyl2wte96ktqxl4uvhqac3m5uq2ag999qe0fhvr5qzywv0k9720yjmz"
 
-def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """Extract all text from PDF bytes"""
-    try:
-        pdf = PdfReader(io.BytesIO(file_bytes))
-        text = ""
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-        return text
-    except Exception as e:
-        print(f"Error extracting PDF text: {e}")
-        return ""
+# For Agentverse Hosted Agent
+agent = Agent()
 
-def extract_skills_from_text(resume_text: str) -> list:
-    """Extract skills from resume text"""
+# Storage for conversation state
+user_sessions = {}
+
+# ---------------------- Utility functions ----------------------
+
+def extract_skills_from_text(text: str) -> list:
+    """Extract technical skills from text"""
     skill_keywords = [
-        "python", "java", "javascript", "react", "node.js", "angular", "vue.js",
-        "django", "flask", "fastapi", "spring", "express",
-        "aws", "azure", "gcp", "docker", "kubernetes", "terraform",
-        "machine learning", "deep learning", "data science", "ai",
-        "tensorflow", "pytorch", "scikit-learn",
-        "sql", "postgresql", "mysql", "mongodb", "redis",
-        "ci/cd", "jenkins", "github actions", "gitlab",
-        "agile", "scrum", "leadership", "project management",
-        "typescript", "go", "rust", "c++", "c#",
-        "html", "css", "sass", "tailwind", "bootstrap",
-        "git", "rest api", "graphql", "microservices",
-        "linux", "bash", "shell scripting", "devops"
+        "python", "java", "javascript", "react", "node.js", "nodejs", "angular", "vue.js", "vue",
+        "django", "flask", "fastapi", "spring", "express", "typescript",
+        "aws", "azure", "gcp", "docker", "kubernetes", "terraform", "ansible",
+        "machine learning", "deep learning", "data science", "ai", "ml",
+        "tensorflow", "pytorch", "scikit-learn", "pandas", "numpy",
+        "sql", "postgresql", "mysql", "mongodb", "redis", "elasticsearch",
+        "ci/cd", "jenkins", "github actions", "gitlab", "agile", "scrum",
+        "html", "css", "tailwind", "bootstrap", "sass", "git", "rest api", "restful",
+        "graphql", "microservices", "linux", "devops", "springboot", "kafka",
+        "rabbitmq", "nginx", "apache", "bash", "shell", "powershell",
+        "c++", "c#", "go", "golang", "rust", "php", "ruby", "rails",
+        "frontend", "backend", "fullstack", "full-stack", "cloud"
     ]
     
-    resume_lower = resume_text.lower()
-    found_skills = [skill for skill in skill_keywords if skill in resume_lower]
+    text_lower = text.lower()
+    found_skills = []
+    
+    # Direct skill matching
+    for skill in skill_keywords:
+        if skill in text_lower:
+            found_skills.append(skill)
+    
+    # Extract quoted skills
+    import re
+    quoted = re.findall(r'["\']([^"\']+)["\']', text)
+    for item in quoted:
+        item_lower = item.lower().strip()
+        if item_lower and len(item_lower) > 2:
+            found_skills.append(item_lower)
+    
     return list(set(found_skills))
 
-def extract_experience_years(resume_text: str) -> int:
-    """Extract years of experience from resume text"""
+def extract_experience_years(text: str) -> int:
+    """Extract years of experience from text"""
     patterns = [
         r'(\d+)\+?\s*years?\s*(?:of)?\s*(?:experience)?',
-        r'experience:\s*(\d+)\+?\s*years?',
-        r'(\d+)\s*yrs?',
+        r'experience[:\s]+(\d+)\+?\s*years?',
+        r'(\d+)\s*yrs?\.?\s*(?:experience)?',
     ]
     for pattern in patterns:
-        match = re.search(pattern, resume_text.lower())
+        match = re.search(pattern, text.lower())
         if match:
             return int(match.group(1))
-    return 3  # default
+    return 3  # Default experience
 
-def extract_project_skills(resume_text: str, skill_list: list) -> list:
-    """
-    Extract skills mentioned specifically in projects sections
-    Looks for lines containing 'project' and matches skills
-    """
-    project_skills = []
-    lines = resume_text.splitlines()
-    for line in lines:
-        if "project" in line.lower():
-            for skill in skill_list:
-                if skill.lower() in line.lower():
-                    project_skills.append(skill)
-    return list(set(project_skills))
+def is_resume_text(text: str) -> bool:
+    """Detect if text is a resume"""
+    resume_indicators = [
+        'experience', 'education', 'skills', 'work history',
+        'employment', 'university', 'bachelor', 'master',
+        'degree', 'graduated', 'certification', 'project',
+        'responsibilities', 'achievements'
+    ]
+    text_lower = text.lower()
+    matches = sum(1 for indicator in resume_indicators if indicator in text_lower)
+    return matches >= 2 or len(text) > 200
 
-def process_resume(resume_text: str, sender: str) -> CandidateProfile:
-    """Process resume text and create candidate profile"""
-    # Extract skills
-    skills = extract_skills_from_text(resume_text)
-    top_skills = extract_project_skills(resume_text, skills)
-    experience_years = extract_experience_years(resume_text)
+def create_profile_from_input(text: str, sender: str) -> CandidateProfile:
+    """Create candidate profile from any input"""
+    skills = extract_skills_from_text(text)
+    experience_years = extract_experience_years(text)
     
-    # Build profile
+    # If no skills found but text mentions looking for jobs, use general search
+    if not skills:
+        skills = ["software developer", "programming"]
+    
     profile = CandidateProfile(
         candidate_id=sender,
-        resume_text=resume_text[:5000],  # limit for transport
+        resume_text=text[:3000],
         skills=skills,
-        top_skills=top_skills if top_skills else skills[:5],  # fallback to top 5 skills
         experience_years=experience_years,
         preferences={
-            "remote": "remote" in resume_text.lower(),
-            "salary_min": 100000,
+            "remote": "remote" in text.lower() or "wfh" in text.lower(),
+            "salary_min": 80000,
             "location_preference": "flexible"
         }
     )
-    
     return profile
 
-# ============================================================================
-# PDF RESUME HANDLER (Direct messaging)
-# ============================================================================
+# ---------------------- Chat Protocol ----------------------
+chat_proto = Protocol(spec=chat_protocol_spec)
 
-@candidate_agent.on_message(model=PDFResume)
-async def handle_pdf_resume(ctx: Context, sender: str, msg: PDFResume):
-    """Handle PDF resumes sent directly"""
-    ctx.logger.info(f"📄 Received PDF resume: {msg.filename} from {sender}")
-    ctx.logger.info(f"👤 Candidate name: {msg.candidate_name}")
+@chat_proto.on_message(ChatMessage)
+async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
+    """Handle incoming chat messages"""
+    ctx.logger.info(f"📨 Message from {sender}")
     
-    try:
-        # Decode base64 to bytes
-        pdf_bytes = base64.b64decode(msg.content)
-        ctx.logger.info(f"✅ Decoded {len(pdf_bytes)} bytes from base64")
-        
-        # Extract text from PDF
-        resume_text = extract_text_from_pdf(pdf_bytes)
-        
-        if not resume_text or len(resume_text) < 50:
-            ctx.logger.error(f"❌ Failed to extract meaningful text from PDF")
-            return
-            
-        ctx.logger.info(f"✅ Extracted {len(resume_text)} characters from PDF")
-        
-        # Process resume
-        profile = process_resume(resume_text, sender)
-        
-        ctx.logger.info(f"🎯 Extracted {len(profile.skills)} skills: {profile.skills}")
-        ctx.logger.info(f"⭐ Top {len(profile.top_skills)} skills from projects: {profile.top_skills}")
-        ctx.logger.info(f"📊 Experience: {profile.experience_years} years")
-        ctx.logger.info(f"🏠 Remote preference: {profile.preferences.get('remote', False)}")
-        
-        # Send to Skills Mapper
-        if SKILLS_MAPPER_ADDRESS and "PUT_YOUR" not in SKILLS_MAPPER_ADDRESS:
-            await ctx.send(SKILLS_MAPPER_ADDRESS, profile)
-            ctx.logger.info(f"✅ Profile sent to Skills Mapper Agent at {SKILLS_MAPPER_ADDRESS}")
-        else:
-            ctx.logger.warning("⚠️  SKILLS_MAPPER_ADDRESS not configured - profile not forwarded")
-            ctx.logger.info("📋 Profile created successfully (stored locally)")
-            
-    except base64.binascii.Error as e:
-        ctx.logger.error(f"❌ Base64 decoding error: {e}")
-    except Exception as e:
-        ctx.logger.error(f"❌ Failed to process PDF: {type(e).__name__}: {e}")
-        import traceback
-        ctx.logger.error(traceback.format_exc())
-
-# ============================================================================
-# CHAT PROTOCOL HANDLERS
-# ============================================================================
-
-if CHAT_AVAILABLE:
-    chat_proto = Protocol(spec=chat_protocol_spec)
+    # Always acknowledge first
+    await ctx.send(
+        sender,
+        ChatAcknowledgement(
+            timestamp=datetime.now(),
+            acknowledged_msg_id=msg.msg_id
+        ),
+    )
     
-    def create_text_chat(text: str) -> ChatMessage:
-        """Create a chat message with text content"""
-        content = [TextContent(type="text", text=text)]
-        return ChatMessage(
-            timestamp=datetime.utcnow(),
-            msg_id=uuid4(),
-            content=content,
-        )
+    # Collect text content
+    text = ''
+    for item in msg.content:
+        if isinstance(item, TextContent):
+            text += item.text
     
-    @chat_proto.on_message(ChatMessage)
-    async def handle_candidate_message(ctx: Context, sender: str, msg: ChatMessage):
-        """Handle messages from ASI:One interface or other agents"""
-        ctx.logger.info(f"📥 Received chat message from {sender}")
-        
-        # Always acknowledge receipt
+    text = text.strip()
+    ctx.logger.info(f"📝 Text received ({len(text)} chars): {text[:100]}...")
+    
+    # Handle empty or very short messages
+    if len(text) < 10:
         await ctx.send(
             sender,
-            ChatAcknowledgement(
+            ChatMessage(
                 timestamp=datetime.utcnow(),
-                acknowledged_msg_id=msg.msg_id
+                msg_id=uuid4(),
+                content=[
+                    TextContent(
+                        type="text",
+                        text="👋 Hi! I help match candidates with jobs.\n\n"
+                             "You can:\n"
+                             "• List your skills (e.g., 'python, react, docker')\n"
+                             "• Paste your full resume\n"
+                             "• Tell me about your experience\n\n"
+                             "What would you like to do?"
+                    ),
+                    EndSessionContent(type="end-session"),
+                ]
+            )
+        )
+        return
+    
+    # Process the input
+    try:
+        ctx.logger.info(f"🧠 Processing profile for {sender}...")
+        profile = create_profile_from_input(text, sender)
+        
+        # Store session
+        user_sessions[sender] = {
+            'profile': profile,
+            'timestamp': datetime.now()
+        }
+        
+        ctx.logger.info(f"✅ Profile created - Skills: {profile.skills}, Experience: {profile.experience_years}y")
+        
+        # Send to Job Discovery Agent
+        await ctx.send(JOB_DISCOVERY_ADDRESS, profile)
+        
+        # Determine response based on input type
+        if is_resume_text(text):
+            response_text = (
+                f"✅ Resume processed successfully!\n\n"
+                f"📊 Profile Summary:\n"
+                f"• Skills detected: {', '.join(profile.skills[:5])}"
+                f"{' and more' if len(profile.skills) > 5 else ''}\n"
+                f"• Experience: {profile.experience_years} years\n"
+                f"• Remote preference: {'Yes' if profile.preferences.get('remote') else 'No'}\n\n"
+                f"🔍 Searching for matching jobs... You'll receive recommendations shortly!"
+            )
+        else:
+            response_text = (
+                f"✅ Got it! Looking for jobs matching your skills:\n\n"
+                f"🎯 Skills: {', '.join(profile.skills)}\n"
+                f"💼 Experience: {profile.experience_years} years\n\n"
+                f"🔍 Searching job boards... I'll send you the best matches!"
+            )
+        
+        await ctx.send(
+            sender,
+            ChatMessage(
+                timestamp=datetime.utcnow(),
+                msg_id=uuid4(),
+                content=[
+                    TextContent(type="text", text=response_text),
+                    EndSessionContent(type="end-session"),
+                ]
             )
         )
         
-        resume_text = ""
-        
-        for item in msg.content:
-            
-            # Handle session start
-            if isinstance(item, StartSessionContent):
-                ctx.logger.info(f"✅ Chat session started with {sender}")
-                
-                welcome_msg = create_text_chat(
-                    "👋 Welcome to JobMate!\n\n"
-                    "I can help you find the perfect job match. Please share your resume:\n"
-                    "• Paste your resume text here, or\n"
-                    "• Send a PDF using the PDFResume message type\n\n"
-                    "I'll analyze your skills and experience to find the best opportunities for you!"
-                )
-                await ctx.send(sender, welcome_msg)
-            
-            # Handle text content (plain resume)
-            elif isinstance(item, TextContent):
-                resume_text = item.text
-                ctx.logger.info(f"📝 Received text resume ({len(resume_text)} chars)")
-        
-        # Process text resume if provided
-        if resume_text and len(resume_text) > 50:
-            try:
-                profile = process_resume(resume_text, sender)
-                
-                ctx.logger.info(f"🎯 Extracted {len(profile.skills)} skills, {len(profile.top_skills)} top skills")
-                ctx.logger.info(f"📊 Experience: {profile.experience_years} years")
-                
-                # Send to Skills Mapper
-                if SKILLS_MAPPER_ADDRESS and "PUT_YOUR" not in SKILLS_MAPPER_ADDRESS:
-                    await ctx.send(SKILLS_MAPPER_ADDRESS, profile)
-                    ctx.logger.info(f"✅ Profile sent to Skills Mapper Agent")
-                    
-                    response = create_text_chat(
-                        f"✅ **Profile Created Successfully!**\n\n"
-                        f"📊 **Skills Found:** {len(profile.skills)}\n"
-                        f"   Top skills: {', '.join(profile.skills[:5])}{'...' if len(profile.skills) > 5 else ''}\n\n"
-                        f"🌟 **Project Skills:** {len(profile.top_skills)}\n"
-                        f"   {', '.join(profile.top_skills[:5]) if profile.top_skills else 'None detected'}\n\n"
-                        f"📈 **Experience:** {profile.experience_years} years\n"
-                        f"🏠 **Remote:** {'Yes' if profile.preferences.get('remote') else 'No'}\n\n"
-                        f"🔄 Your profile is now being processed through our AI network to find the best job matches..."
-                    )
-                    await ctx.send(sender, response)
-                else:
-                    ctx.logger.warning("⚠️  SKILLS_MAPPER_ADDRESS not configured")
-                    response = create_text_chat(
-                        f"✅ **Profile Created!**\n\n"
-                        f"📊 Found **{len(profile.skills)} skills**\n"
-                        f"⚠️  Skills Mapper not configured - profile stored locally"
-                    )
-                    await ctx.send(sender, response)
-                    
-            except Exception as e:
-                ctx.logger.error(f"❌ Failed to process resume: {e}")
-                error_msg = create_text_chat(
-                    f"❌ **Error:** Failed to process your resume.\n"
-                    f"Please ensure your resume contains clear information about your skills and experience."
-                )
-                await ctx.send(sender, error_msg)
-    
-    # IMPORTANT: Include chat protocol INSIDE the if CHAT_AVAILABLE block
-    try:
-        candidate_agent.include(chat_proto, publish_manifest=True)
-        print("✅ Chat Protocol enabled successfully")
     except Exception as e:
-        print(f"⚠️ Could not enable Chat Protocol: {e}")
-        print("   Agent will run in basic mode")
-        CHAT_AVAILABLE = False
+        ctx.logger.error(f"❌ Error: {e}")
+        await ctx.send(
+            sender,
+            ChatMessage(
+                timestamp=datetime.utcnow(),
+                msg_id=uuid4(),
+                content=[
+                    TextContent(
+                        type="text",
+                        text="❌ Sorry, something went wrong. Please try again or rephrase your input."
+                    ),
+                    EndSessionContent(type="end-session"),
+                ]
+            )
+        )
 
-# ============================================================================
-# DIRECT MESSAGE HANDLER (fallback)
-# ============================================================================
+@chat_proto.on_message(ChatAcknowledgement)
+async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
+    """Handle acknowledgements"""
+    ctx.logger.info(f"✅ Ack from {sender}")
 
-@candidate_agent.on_message(model=CandidateProfile)
-async def handle_direct_profile(ctx: Context, sender: str, msg: CandidateProfile):
-    """Handle profiles sent directly (for testing without Chat Protocol)"""
-    ctx.logger.info(f"📥 Received direct profile from {sender}")
-    ctx.logger.info(f"🎯 Skills: {msg.skills}")
-    ctx.logger.info(f"⭐ Top skills: {msg.top_skills}")
-    ctx.logger.info(f"📊 Experience: {msg.experience_years} years")
+# Include protocol
+agent.include(chat_proto, publish_manifest=True)
+
+# ---------------------- Recommendation Handler ----------------------
+
+@agent.on_message(model=RecommendationReport)
+async def handle_recommendation(ctx: Context, sender: str, msg: RecommendationReport):
+    """Receive and forward job recommendations"""
+    ctx.logger.info(f"📬 Recommendations for {msg.candidate_id}")
     
-    # Forward to Skills Mapper
-    if SKILLS_MAPPER_ADDRESS and "PUT_YOUR" not in SKILLS_MAPPER_ADDRESS:
-        await ctx.send(SKILLS_MAPPER_ADDRESS, msg)
-        ctx.logger.info(f"📤 Profile forwarded to Skills Mapper")
-    else:
-        ctx.logger.warning("⚠️  SKILLS_MAPPER_ADDRESS not configured!")
+    try:
+        await ctx.send(
+            msg.candidate_id,
+            ChatMessage(
+                timestamp=datetime.utcnow(),
+                msg_id=uuid4(),
+                content=[
+                    TextContent(
+                        type="text",
+                        text=f"🎯 Your Job Recommendations:\n\n{msg.report}"
+                    ),
+                    EndSessionContent(type="end-session"),
+                ]
+            )
+        )
+        ctx.logger.info(f"✅ Sent recommendations to {msg.candidate_id}")
+    except Exception as e:
+        ctx.logger.error(f"Error sending recommendations: {e}")
 
-# ============================================================================
-# STARTUP HANDLER
-# ============================================================================
-
-@candidate_agent.on_event("startup")
+@agent.on_event("startup")
 async def startup(ctx: Context):
+    """Startup event"""
     ctx.logger.info("="*70)
-    ctx.logger.info("🚀 CANDIDATE PROFILE AGENT (PDF+Projects) STARTED")
+    ctx.logger.info("🚀 CANDIDATE PROFILE AGENT (JOB MATCHER)")
+    ctx.logger.info(f"📍 Address: {ctx.agent.address}")
+    ctx.logger.info(f"🔗 Job Discovery: {JOB_DISCOVERY_ADDRESS}")
+    ctx.logger.info(f"💬 Chat Protocol: Enabled")
     ctx.logger.info("="*70)
-    ctx.logger.info(f"📍 Agent Address: {ctx.agent.address}")
-    ctx.logger.info(f"🔌 Port: 8001")
-    ctx.logger.info(f"💬 Chat Protocol: {'ENABLED ✅' if CHAT_AVAILABLE else 'DISABLED ⚠️'}")
-    ctx.logger.info(f"🔗 Skills Mapper: {SKILLS_MAPPER_ADDRESS if SKILLS_MAPPER_ADDRESS else 'NOT CONFIGURED'}")
-    ctx.logger.info(f"🎯 Ready to receive candidate resumes!")
-    ctx.logger.info("="*70 + "\n")
 
 if __name__ == "__main__":
-    print("\n" + "="*70)
-    print("AGENT 1: CANDIDATE PROFILE AGENT (PDF+Projects)")
-    print("="*70 + "\n")
-    candidate_agent.run()
+    agent.run()

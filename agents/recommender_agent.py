@@ -1,466 +1,177 @@
-"""
-Agent 5: Recommendation Agent with Real-Time Course Search
-Aggregates job scores and sends final recommendations
-Includes LangChain-powered real-time course discovery
-"""
+from uagents import Agent, Context
 
-from datetime import datetime
-from uuid import uuid4
-from uagents import Agent, Context, Model, Protocol
-from config.agent_addresses import TEST_AGENT_ADDRESS
-from agents.models import RecommendationReport
+# Import models from centralized models.py
+from models import JobListingBatch, RecommendationReport
 
-# LangChain imports for real-time search
-try:
-    from langchain_community.tools import DuckDuckGoSearchRun
-    # from langchain.agents import initialize_agent, AgentType
-    from langchain_openai import ChatOpenAI
-    from langchain_core.prompts import PromptTemplate
-    SEARCH_AVAILABLE = True
-except ImportError:
-    SEARCH_AVAILABLE = False
-    print("LangChain not available - using fallback resources")
+# 🔗 Replace with actual Candidate Agent address
+CANDIDATE_AGENT_ADDRESS = "agent1q08kycnalue0xwhgl888cwlaxlfaqmyyfmzrlvqqpd38c9xh57hlgk893l8"
 
-# Chat protocol imports
-try:
-    from uagents_core.contrib.protocols.chat import (
-        ChatAcknowledgement,
-        ChatMessage,
-        TextContent,
-        chat_protocol_spec,
-    )
-    CHAT_AVAILABLE = True
-except ImportError:
-    CHAT_AVAILABLE = False
-    print("⚠️  Chat protocol not available - running in basic mode")
+# Initialize Agent for Agentverse
+agent = Agent()
 
-# Data Models
-class MatchScore(Model):
-    job_id: str
-    candidate_id: str
-    title: str
-    company: str
-    match_score: float
-    reasoning: str
-    skill_gaps: list
-    strengths: list
-    salary_range: str
-    location: str
-    remote: bool
-    source_url: str 
+# --------------------------- SCORING ---------------------------
 
-
-# Initialize Agent
-recommender_agent = Agent(
-    name="Recommendation Agent",
-    port=8005,
-    seed="recommender_seed_def_unique_12345",
-    endpoint=["http://localhost:8005/submit"]
-)
-
-# Store recommendations by candidate
-candidate_recommendations = {}
-
-# ============================================================================
-# REAL-TIME SEARCH FUNCTIONS
-# ============================================================================
-
-def extract_url_from_search(text: str, domain: str) -> str:
-    """Extract clean URL from search results"""
-    import re
+def score_job(job: dict) -> dict:
+    """Enhanced scoring based on match score and other factors"""
+    score = job.get('match_score', 0.5)
     
-    # Try to find URL patterns
-    url_pattern = rf'https?://(?:www\.)?{domain}[^\s\)]*'
-    matches = re.findall(url_pattern, text)
+    # Bonus for remote positions
+    if job.get('remote', False):
+        score += 0.1
     
-    if matches:
-        # Return the first clean URL
-        url = matches[0].rstrip('.,;)')
-        return url
-    
-    return None
-
-def search_youtube_courses(skill: str) -> str:
-    """Search for top-rated YouTube courses and return direct video link"""
-    if not SEARCH_AVAILABLE:
-        return "🎥 https://www.youtube.com/results?search_query=freeCodeCamp+" + skill.replace(' ', '+')
-    
-    try:
-        search = DuckDuckGoSearchRun()
-        query = f"site:youtube.com {skill} tutorial full course freeCodeCamp OR programming with mosh OR traversy media"
-        results = search.run(query)
-        
-        # Extract YouTube URL
-        url = extract_url_from_search(results, r'(?:youtube\.com|youtu\.be)')
-        
-        if url:
-            return f"🎥 {url}"
-        
-        # Fallback: construct search URL
-        search_query = f"freeCodeCamp {skill} full course".replace(' ', '+')
-        return f"🎥 https://www.youtube.com/results?search_query={search_query}"
-    
-    except Exception as e:
-        search_query = f"freeCodeCamp {skill}".replace(' ', '+')
-        return f"🎥 https://www.youtube.com/results?search_query={search_query}"
-
-def search_udemy_courses(skill: str) -> str:
-    """Search for top-rated Udemy courses and return direct course link"""
-    if not SEARCH_AVAILABLE:
-        return "💎 https://www.udemy.com/courses/search/?q=" + skill.replace(' ', '%20') + "&sort=highest-rated"
-    
-    try:
-        search = DuckDuckGoSearchRun()
-        query = f"site:udemy.com {skill} course highest rated complete guide"
-        results = search.run(query)
-        
-        # Extract Udemy URL
-        url = extract_url_from_search(results, r'udemy\.com')
-        
-        if url and '/course/' in url:
-            return f"💎 {url}"
-        
-        # Fallback: construct search URL with highest-rated filter
-        search_query = skill.replace(' ', '%20')
-        return f"💎 https://www.udemy.com/courses/search/?q={search_query}&sort=highest-rated"
-    
-    except Exception as e:
-        search_query = skill.replace(' ', '%20')
-        return f"💎 https://www.udemy.com/courses/search/?q={search_query}&sort=highest-rated"
-
-def search_coursera_courses(skill: str) -> str:
-    """Search for Coursera specializations and return direct course link"""
-    if not SEARCH_AVAILABLE:
-        return "🎓 https://www.coursera.org/search?query=" + skill.replace(' ', '%20')
-    
-    try:
-        search = DuckDuckGoSearchRun()
-        query = f"site:coursera.org {skill} specialization professional certificate"
-        results = search.run(query)
-        
-        # Extract Coursera URL
-        url = extract_url_from_search(results, r'coursera\.org')
-        
-        if url and ('/specializations/' in url or '/professional-certificates/' in url or '/learn/' in url):
-            return f"🎓 {url}"
-        
-        # Fallback: construct search URL
-        search_query = skill.replace(' ', '%20')
-        return f"🎓 https://www.coursera.org/search?query={search_query}"
-    
-    except Exception as e:
-        search_query = skill.replace(' ', '%20')
-        return f"🎓 https://www.coursera.org/search?query={search_query}"
-
-def get_comprehensive_learning_resources(skill: str) -> dict:
-    """Get comprehensive learning resources with direct links"""
-    
-    # Fallback direct links (used if search fails)
-    fallback_resources = {
-        "kubernetes": {
-            "youtube": "🎥 https://youtu.be/X48VuDVv0do",
-            "premium": "💎 https://www.udemy.com/course/learn-devops-the-complete-kubernetes-course/"
-        },
-        "tensorflow": {
-            "youtube": "🎥 https://youtu.be/tPYj3fFJGjk",
-            "premium": "💎 https://www.coursera.org/professional-certificates/tensorflow-in-practice"
-        },
-        "react": {
-            "youtube": "🎥 https://youtu.be/bMknfKXIFA8",
-            "premium": "💎 https://www.udemy.com/course/react-the-complete-guide-incl-redux/"
-        },
-        "aws": {
-            "youtube": "🎥 https://youtu.be/Ia-UEYYR44s",
-            "premium": "💎 https://www.udemy.com/course/aws-certified-solutions-architect-associate-saa-c03/"
-        },
-        "python": {
-            "youtube": "🎥 https://youtu.be/rfscVS0vtbw",
-            "premium": "💎 https://www.udemy.com/course/100-days-of-code/"
-        },
-        "docker": {
-            "youtube": "🎥 https://youtu.be/3c-iBn73dDE",
-            "premium": "💎 https://www.udemy.com/course/docker-mastery/"
-        },
-        "typescript": {
-            "youtube": "🎥 https://youtu.be/30LWjhZzg50",
-            "premium": "💎 https://www.udemy.com/course/understanding-typescript/"
-        },
-        "node.js": {
-            "youtube": "🎥 https://youtu.be/Oe421EPjeBE",
-            "premium": "💎 https://www.udemy.com/course/the-complete-nodejs-developer-course-2/"
-        },
-        "django": {
-            "youtube": "🎥 https://youtu.be/F5mRW0jo-U4",
-            "premium": "💎 https://www.udemy.com/course/python-django-dev-to-deployment/"
-        },
-        "machine learning": {
-            "youtube": "🎥 https://youtu.be/i_LwzRVP7bg",
-            "premium": "💎 https://www.coursera.org/specializations/machine-learning-introduction"
-        },
-        "golang": {
-            "youtube": "🎥 https://youtu.be/YS4e4q9oBaU",
-            "premium": "💎 https://www.udemy.com/course/go-the-complete-developers-guide/"
-        },
-        "angular": {
-            "youtube": "🎥 https://youtu.be/3qBXWUpoPHo",
-            "premium": "💎 https://www.udemy.com/course/the-complete-guide-to-angular-2/"
-        },
-        "vue.js": {
-            "youtube": "🎥 https://youtu.be/FXpIoQ_rT_c",
-            "premium": "💎 https://www.udemy.com/course/vuejs-2-the-complete-guide/"
-        }
-    }
-    
-    skill_lower = skill.lower()
-    
-    # Try real-time search first
-    if SEARCH_AVAILABLE:
-        try:
-            youtube_link = search_youtube_courses(skill)
-            premium_link = search_udemy_courses(skill) or search_coursera_courses(skill)
-            
-            return {
-                "youtube": youtube_link,
-                "premium": premium_link
-            }
-        except Exception as e:
-            print(f"⚠️ Search failed for {skill}: {e}")
-    
-    # Fallback to curated direct links
-    if skill_lower in fallback_resources:
-        return fallback_resources[skill_lower]
-    
-    # Generic fallback with direct search URLs
-    search_query = skill.replace(' ', '%20')
-    youtube_query = skill.replace(' ', '+')
+    # Bonus for specified salary
+    if job.get('salary', 'Not specified') != "Not specified":
+        score += 0.05
     
     return {
-        "youtube": f"🎥 https://www.youtube.com/results?search_query=freeCodeCamp+{youtube_query}+full+course",
-        "premium": f"💎 https://www.udemy.com/courses/search/?q={search_query}&sort=highest-rated"
+        "job": job,
+        "final_score": round(min(score, 1.0), 2)
     }
 
-# ============================================================================
-# HELPER FUNCTIONS
-# ============================================================================
+# --------------------------- LEARNING PATH ---------------------------
 
-def generate_learning_path(skill_gaps: list) -> str:
-    """Generate personalized learning recommendations with direct clickable links"""
-    if not skill_gaps:
-        return "✅ You have all required skills!"
+def generate_learning_path(all_jobs: list) -> str:
+    """Generate learning recommendations based on job requirements"""
     
-    path = "\n🎓 **Recommended Learning Path:**\n"
+    # Extract all requirements from jobs
+    all_requirements = set()
+    for job in all_jobs:
+        requirements = job.get('requirements', [])
+        if requirements:
+            all_requirements.update(requirements)
     
-    for i, skill in enumerate(skill_gaps[:3], 1):
-        resources = get_comprehensive_learning_resources(skill)
-        
-        path += f"\n**{i}. {skill.title()}**\n"
-        
-        # YouTube (Free) - Direct link
-        if isinstance(resources, dict) and 'youtube' in resources:
-            path += f"   FREE: {resources['youtube']}\n"
-        
-        # Premium (Udemy/Coursera) - Direct link
-        if isinstance(resources, dict) and 'premium' in resources:
-            path += f"   PREMIUM: {resources['premium']}\n"
+    if not all_requirements:
+        return "💡 Keep building projects and stay updated with industry trends!"
     
-    path += "\n💡 **Pro Tip:** Click the links above to start learning immediately!\n"
+    # Get top 5 most common requirements
+    requirement_counts = {}
+    for job in all_jobs:
+        for req in job.get('requirements', []):
+            requirement_counts[req] = requirement_counts.get(req, 0) + 1
     
-    return path
+    sorted_reqs = sorted(requirement_counts.items(), key=lambda x: x[1], reverse=True)
+    top_skills = [skill for skill, _ in sorted_reqs[:5]]
+    
+    if not top_skills:
+        return "💡 Focus on deepening your existing skills through real-world projects!"
+    
+    lines = ["💡 Recommended Learning Path:", ""]
+    for i, skill in enumerate(top_skills, 1):
+        lines.append(f"{i}. **{skill.title()}** - High demand across {requirement_counts[skill]} job(s)")
+    
+    lines.append("\n📚 Tip: Build a portfolio project showcasing these skills!")
+    
+    return "\n".join(lines)
 
-def create_recommendation_report(matches: list) -> str:
-    """Create comprehensive recommendation report"""
-    if not matches:
-        return "No matching jobs found. Please update your profile or try different skills."
-    
-    # Sort by score
-    matches.sort(key=lambda x: x.match_score, reverse=True)
-    top_matches = matches[:5]
-    
-    report = "\n" + "="*70 + "\n"
-    report += "🎯 **YOUR TOP JOB MATCHES**\n"
-    report += "="*70 + "\n\n"
-    
-    for i, match in enumerate(top_matches, 1):
-        report += f"**#{i} - {match.title}** at **{match.company}**\n"
-        report += f"📊 Match Score: {match.match_score:.1f}%\n"
-        report += f"💰 Salary: {match.salary_range}\n"
-        report += f"📍 Location: {match.location}\n"
-        report += f"🏠 Remote: {'Yes ✅' if match.remote else 'No ❌'}\n"
-        report += f"🔗 Apply: {match.source_url}\n\n"
-        
-        if match.strengths:
-            report += f"✅ **Your Strengths:**\n"
-            report += f"   {', '.join(match.strengths[:5])}\n\n"
-        
-        if match.skill_gaps:
-            report += f"⚠️  **Skills to Develop:**\n"
-            report += f"   {', '.join(match.skill_gaps[:5])}\n"
-            report += generate_learning_path(match.skill_gaps)
-        
-        report += "\n" + "-"*70 + "\n\n"
-    
-    # Overall recommendations
-    avg_score = sum(m.match_score for m in matches) / len(matches)
-    report += f"📈 **Overall Profile Strength:** {avg_score:.1f}%\n\n"
-    
-    if avg_score >= 80:
-        report += "🌟 Excellent profile! Apply to these positions with confidence.\n"
-    elif avg_score >= 60:
-        report += "💪 Strong profile! Consider upskilling in gap areas to reach 80%+.\n"
-    else:
-        report += "📚 Focus on developing high-demand skills to improve match scores.\n"
-    
-    report += f"\n📊 **Statistics:**\n"
-    report += f"   - Total jobs analyzed: {len(matches)}\n"
-    report += f"   - Top 5 shown above\n"
-    report += f"   - Average match score: {avg_score:.1f}%\n"
-    report += f"   - Remote jobs: {sum(1 for m in matches if m.remote)}/{len(matches)}\n"
-    
-    report += "\n" + "="*70 + "\n"
-    
-    return report
+# --------------------------- FINAL REPORT ---------------------------
 
-# ============================================================================
-# CHAT PROTOCOL (if available)
-# ============================================================================
-
-if CHAT_AVAILABLE:
-    chat_proto = Protocol(spec=chat_protocol_spec)
+def create_final_report(scored_jobs: list) -> str:
+    """Create personalized job recommendation report"""
     
-    def create_text_chat(text: str) -> ChatMessage:
-        """Create a chat message with text content"""
-        content = [TextContent(type="text", text=text)]
-        return ChatMessage(
-            timestamp=datetime.utcnow(),
-            msg_id=uuid4(),
-            content=content,
+    if not scored_jobs:
+        return "No jobs found matching your profile at the moment. Please try again later!"
+    
+    # Sort by final score
+    sorted_jobs = sorted(scored_jobs, key=lambda x: x["final_score"], reverse=True)
+    top_jobs = sorted_jobs[:5]  # Top 5 recommendations
+    
+    lines = ["🎯 **Your Personalized Job Recommendations**", ""]
+    
+    for i, item in enumerate(top_jobs, 1):
+        job = item["job"]
+        score = item["final_score"]
+        
+        # Format job listing
+        remote_badge = "🌍 Remote" if job.get('remote', False) else f"📍 {job.get('location', 'N/A')}"
+        
+        lines.append(f"**{i}. {job.get('title', 'N/A')}**")
+        lines.append(f"🏢 Company: {job.get('company', 'N/A')}")
+        lines.append(f"{remote_badge}")
+        lines.append(f"💰 Salary: {job.get('salary', 'Not specified')}")
+        lines.append(f"⭐ Match Score: {score}/1.0")
+        lines.append(f"🔗 Apply: {job.get('url', 'N/A')}")
+        lines.append("")
+    
+    # Add statistics
+    avg_score = sum(j["final_score"] for j in top_jobs) / len(top_jobs)
+    remote_count = sum(1 for j in top_jobs if j["job"].get('remote', False))
+    
+    lines.append("---")
+    lines.append("")
+    lines.append(f"📊 **Summary:**")
+    lines.append(f"• Average match score: {avg_score:.2f}/1.0")
+    lines.append(f"• Remote positions: {remote_count}/{len(top_jobs)}")
+    lines.append(f"• Total jobs found: {len(scored_jobs)}")
+    lines.append("")
+    
+    return "\n".join(lines)
+
+# --------------------------- MESSAGE HANDLER ---------------------------
+
+@agent.on_message(model=JobListingBatch)
+async def handle_job_batch(ctx: Context, sender: str, msg: JobListingBatch):
+    """Handle incoming job batch"""
+    
+    candidate_id = msg.candidate_id
+    jobs = msg.jobs
+    total_count = msg.total_count
+    
+    ctx.logger.info(f"📦 Received batch for {candidate_id[:16]}...")
+    ctx.logger.info(f"📊 Total jobs in batch: {total_count}")
+    
+    if not jobs:
+        ctx.logger.warning(f"⚠️ Empty job batch for {candidate_id}")
+        return
+    
+    # Log received jobs
+    for i, job in enumerate(jobs[:5], 1):
+        ctx.logger.info(
+            f"💼 [{i}] {job.get('title', 'N/A')} @ {job.get('company', 'N/A')} "
+            f"(Score: {job.get('match_score', 0):.2f})"
         )
     
-    @chat_proto.on_message(ChatMessage)
-    async def handle_chat_message(ctx: Context, sender: str, msg: ChatMessage):
-        """Handle incoming chat messages"""
-        ctx.logger.info(f"💬 Received chat message from {sender}")
-        
-        await ctx.send(
-            sender,
-            ChatAcknowledgement(
-                timestamp=datetime.utcnow(),
-                acknowledged_msg_id=msg.msg_id
-            )
-        )
-        
-        if sender in candidate_recommendations:
-            report = create_recommendation_report(candidate_recommendations[sender])
-            response = create_text_chat(report)
-            await ctx.send(sender, response)
-            del candidate_recommendations[sender]
-        else:
-            welcome = create_text_chat(
-                "👋 Welcome! Your job recommendations will appear here once processing is complete."
-            )
-            await ctx.send(sender, welcome)
+    if len(jobs) > 5:
+        ctx.logger.info(f"   ... and {len(jobs) - 5} more jobs")
     
-    @chat_proto.on_message(ChatAcknowledgement)
-    async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
-        """Handle acknowledgements"""
-        ctx.logger.info(f"✅ Message {msg.acknowledged_msg_id} acknowledged by {sender}")
-
-# ============================================================================
-# MAIN MESSAGE HANDLER
-# ============================================================================
-
-@recommender_agent.on_message(model=MatchScore)
-async def aggregate_recommendations(ctx: Context, sender: str, msg: MatchScore):
-    """Aggregate job scores and generate final recommendations"""
+    # Score all jobs
+    ctx.logger.info(f"🎯 Scoring {len(jobs)} jobs...")
+    scored_jobs = [score_job(job) for job in jobs]
     
-    ctx.logger.info("="*70)
-    ctx.logger.info(f"📥 MATCH SCORE RECEIVED")
-    ctx.logger.info("="*70)
-    ctx.logger.info(f"Job: {msg.title} at {msg.company}")
-    ctx.logger.info(f"Score: {msg.match_score:.1f}%")
-    ctx.logger.info(f"Candidate: {msg.candidate_id}")
-    ctx.logger.info(f"Apply Link: {msg.source_url[:50]}...")
+    # Create main report
+    ctx.logger.info(f"📝 Creating recommendation report...")
+    report_text = create_final_report(scored_jobs)
     
-    if msg.candidate_id not in candidate_recommendations:
-        candidate_recommendations[msg.candidate_id] = []
-    candidate_recommendations[msg.candidate_id].append(msg)
+    # Add learning path
+    report_text += "\n\n" + generate_learning_path(jobs)
     
-    num_recommendations = len(candidate_recommendations[msg.candidate_id])
-    ctx.logger.info(f"📊 Total recommendations collected: {num_recommendations}")
+    # Add footer
+    report_text += "\n\n---\n📈 **Next Steps:** Review these opportunities and tailor your applications to each company's needs!"
     
-    if num_recommendations >= 5:
-        ctx.logger.info("\n" + "="*70)
-        ctx.logger.info("✅ GENERATING FINAL REPORT WITH REAL-TIME COURSE SEARCH")
-        ctx.logger.info("="*70)
-        
-        report = create_recommendation_report(
-            candidate_recommendations[msg.candidate_id]
-        )
-        
-        ctx.logger.info("\n" + report)
-        
-        if CHAT_AVAILABLE:
-            try:
-                response = create_text_chat(report)
-                await ctx.send(msg.candidate_id, response)
-                ctx.logger.info("📤 Report sent to candidate via Chat Protocol")
-            except Exception as e:
-                ctx.logger.warning(f"⚠️ Could not send via Chat Protocol: {e}")
+    # Extract top job titles
+    top_job_titles = [job.get('title', 'N/A') for job in jobs[:5]]
+    
+    # Create report model
+    report = RecommendationReport(
+        candidate_id=candidate_id,
+        report=report_text,
+        top_matches=top_job_titles
+    )
+    
+    # Send report
+    try:
+        await ctx.send(CANDIDATE_AGENT_ADDRESS, report)
+        ctx.logger.info(f"✅ Report sent to Candidate Agent for {candidate_id[:16]}...")
+    except Exception as e:
+        ctx.logger.error(f"❌ Failed to send report: {e}")
 
-        try:
-            await ctx.send(
-                TEST_AGENT_ADDRESS,
-                RecommendationReport(
-                    candidate_id=msg.candidate_id,
-                    report=report,
-                    top_matches=[m.job_id for m in candidate_recommendations[msg.candidate_id][:5]]
-                )
-            )
-            ctx.logger.info(f"📤 Report also sent to test agent: {TEST_AGENT_ADDRESS}")
-        except Exception as e:
-            ctx.logger.warning(f"⚠️ Could not send report to test agent: {e}")
-        
-        del candidate_recommendations[msg.candidate_id]
-        ctx.logger.info("🧹 Recommendations cleared for candidate")
-        ctx.logger.info("="*70 + "\n")
-    else:
-        ctx.logger.info(f"⏳ Waiting for more recommendations ({num_recommendations}/5)")
-        ctx.logger.info("="*70 + "\n")
-
-# ============================================================================
-# STARTUP HANDLER
-# ============================================================================
-
-@recommender_agent.on_event("startup")
+@agent.on_event("startup")
 async def startup(ctx: Context):
-    """Initialize agent on startup"""
     ctx.logger.info("="*70)
     ctx.logger.info("🚀 RECOMMENDATION AGENT STARTED")
+    ctx.logger.info(f"📍 Address: {ctx.agent.address}")
+    ctx.logger.info(f"⚙️ Processing Mode: Batch (entire job list at once)")
+    ctx.logger.info(f"📤 Sends reports to: {CANDIDATE_AGENT_ADDRESS}")
     ctx.logger.info("="*70)
-    ctx.logger.info(f"📍 Agent Address: {ctx.agent.address}")
-    ctx.logger.info(f"🔌 Port: 8005")
-    ctx.logger.info(f"💬 Chat Protocol: {'ENABLED' if CHAT_AVAILABLE else 'DISABLED'}")
-    ctx.logger.info(f"🔍 Real-time Search: {'ENABLED' if SEARCH_AVAILABLE else 'DISABLED'}")
-    ctx.logger.info(f"🎯 Minimum recommendations before report: 5")
-    ctx.logger.info("="*70 + "\n")
-
-# ============================================================================
-# INCLUDE CHAT PROTOCOL & RUN
-# ============================================================================
-
-if CHAT_AVAILABLE:
-    try:
-        recommender_agent.include(chat_proto, publish_manifest=True)
-        print("✅ Chat Protocol enabled successfully")
-    except Exception as e:
-        print(f"⚠️  Could not enable Chat Protocol: {e}")
 
 if __name__ == "__main__":
-    print("\n" + "="*70)
-    print("AGENT 5: RECOMMENDATION AGENT (Real-Time Course Search)")
-    print("="*70)
-    print(f"🔍 LangChain Search: {'AVAILABLE' if SEARCH_AVAILABLE else 'UNAVAILABLE'}")
-    print("\n🔧 Starting agent...")
-    print("="*70 + "\n")
-    
-    recommender_agent.run()
+    agent.run()

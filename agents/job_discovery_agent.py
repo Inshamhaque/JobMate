@@ -1,67 +1,39 @@
-from uagents import Agent, Context, Model
+from uagents import Agent, Context
 import os
-from config.agent_addresses import SCORER_ADDRESS
-from dotenv import load_dotenv
-import json
 import aiohttp
 import asyncio
 from typing import List, Dict
 from urllib.parse import quote_plus
 from datetime import datetime, timedelta
 
-load_dotenv()
+# Import models from your models.py file
+from models import CandidateProfile, JobListingBatch
 
-# Data Models
-class EnrichedSkillsProfile(Model):
-    candidate_id: str
-    original_skills: list
-    related_skills: list
-    skill_categories: dict
-    market_demand: dict
-    experience_years: int
-    preferences: dict
+# 🔗 Replace with actual Recommendation Agent address
+RECOMMENDATION_ADDRESS = "agent1q2g24508ufjrlcusjxk7cmg53f7udtu4a49a5e76zfj77x207sj5us5xwt6"
 
-class JobListing(Model):
-    job_id: str
-    candidate_id: str
-    title: str
-    company: str
-    requirements: list
-    description: str
-    salary_range: str
-    location: str
-    remote: bool
-    source_url: str
-    match_score: float
-
-# Initialize Agent
-job_discovery_agent = Agent(
-    name="Job Discovery Agent",
-    port=8003,
-    seed="job_discovery_seed_789",
-    endpoint=["http://localhost:8003/submit"]
-)
+# Initialize Agent for Agentverse
+agent = Agent()
 
 class JobBoardAggregator:
-    """Aggregates jobs from multiple free sources with smart filtering"""
+    """Aggregates jobs from multiple sources with intelligent filtering"""
     
     def __init__(self):
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
-        self.max_jobs_total = 12  # Hard limit
-        self.days_filter = 7  # Only last 7 days
+        self.max_jobs_per_source = 5
+        self.max_jobs_total = 15
+        self.days_filter = 14  # Last 14 days
     
     def _is_recent_job(self, date_str: str) -> bool:
-        """Check if job was posted in last 7 days"""
+        """Check if job was posted in last 14 days"""
         if not date_str:
-            return True  # Include if no date info
+            return True
         
         try:
-            # Handle different date formats
             cutoff_date = datetime.now() - timedelta(days=self.days_filter)
             
-            # Common formats: "2025-10-20", "2025-10-20T10:30:00Z"
             if 'T' in date_str:
                 job_date = datetime.fromisoformat(date_str.split('T')[0])
             else:
@@ -69,152 +41,55 @@ class JobBoardAggregator:
             
             return job_date >= cutoff_date
         except:
-            return True  # Include if parsing fails
+            return True
     
-    def _quick_skill_match(self, job_text: str, top_skills: List[str]) -> bool:
-        """Fast pre-filter: Check if ANY top skill matches"""
+    def _quick_skill_match(self, job_text: str, skills: List[str]) -> bool:
+        """Check if ANY skill matches"""
         job_text_lower = job_text.lower()
         
-        # Must match at least 1 of top 3 skills
-        for skill in top_skills[:3]:
+        for skill in skills[:5]:  # Check top 5 skills
             if skill.lower() in job_text_lower:
                 return True
         return False
     
-    def _calculate_match_score(self, job_text: str, all_skills: List[str]) -> float:
-        """Quick match scoring without LLM"""
+    def _calculate_match_score(self, job_text: str, skills: List[str]) -> float:
+        """Calculate match score based on skill overlap"""
         job_text_lower = job_text.lower()
         matches = 0
+        total_skills = len(skills[:5])
         
-        # Top 3 skills worth more
-        for i, skill in enumerate(all_skills[:5]):
+        for i, skill in enumerate(skills[:5]):
             if skill.lower() in job_text_lower:
-                weight = 0.3 if i < 3 else 0.1  # Top 3 get higher weight
+                # Top 3 skills get higher weight
+                weight = 0.25 if i < 3 else 0.15
                 matches += weight
         
-        return min(matches, 1.0)  # Cap at 1.0
+        return min(matches, 1.0)
     
-    async def fetch_remotive_jobs(self, top_skills: List[str], all_skills: List[str]) -> List[Dict]:
-        """Fetch from Remotive with pre-filtering"""
-        jobs = []
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = "https://remotive.com/api/remote-jobs"
-                
-                async with session.get(url, headers=self.headers, timeout=10) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        all_jobs = data.get('jobs', [])
-                        
-                        for job in all_jobs:
-                            # Date filter
-                            if not self._is_recent_job(job.get('publication_date')):
-                                continue
-                            
-                            # Quick skill match
-                            job_text = f"{job.get('title', '')} {job.get('description', '')} {job.get('category', '')}"
-                            
-                            if not self._quick_skill_match(job_text, top_skills):
-                                continue
-                            
-                            # Calculate score
-                            score = self._calculate_match_score(job_text, all_skills)
-                            
-                            if score >= 0.2:  # Minimum threshold
-                                jobs.append({
-                                    'title': job.get('title', 'N/A'),
-                                    'company': job.get('company_name', 'N/A'),
-                                    'location': job.get('candidate_required_location', 'Remote'),
-                                    'description': job.get('description', 'N/A')[:300],
-                                    'url': job.get('url', 'N/A'),
-                                    'salary': job.get('salary', 'Not specified'),
-                                    'remote': True,
-                                    'source': 'Remotive',
-                                    'match_score': score,
-                                    'requirements': []  # Will be extracted if needed
-                                })
-                            
-                            if len(jobs) >= 5:  # Max per source
-                                break
-                        
-        except Exception as e:
-            print(f"Remotive fetch error: {e}")
-        
-        return jobs
-    
-    async def fetch_arbeitnow_jobs(self, top_skills: List[str], all_skills: List[str]) -> List[Dict]:
-        """Fetch from Arbeitnow with pre-filtering"""
-        jobs = []
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = "https://www.arbeitnow.com/api/job-board-api"
-                
-                async with session.get(url, headers=self.headers, timeout=10) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        all_jobs = data.get('data', [])
-                        
-                        for job in all_jobs:
-                            # Date filter
-                            if not self._is_recent_job(job.get('created_at')):
-                                continue
-                            
-                            # Quick skill match
-                            job_text = f"{job.get('title', '')} {job.get('description', '')} {' '.join(job.get('tags', []))}"
-                            
-                            if not self._quick_skill_match(job_text, top_skills):
-                                continue
-                            
-                            score = self._calculate_match_score(job_text, all_skills)
-                            
-                            if score >= 0.2:
-                                jobs.append({
-                                    'title': job.get('title', 'N/A'),
-                                    'company': job.get('company_name', 'N/A'),
-                                    'location': job.get('location', 'Remote'),
-                                    'description': job.get('description', 'N/A')[:300],
-                                    'url': job.get('url', 'N/A'),
-                                    'salary': 'Not specified',
-                                    'remote': job.get('remote', False),
-                                    'source': 'Arbeitnow',
-                                    'match_score': score,
-                                    'requirements': job.get('tags', [])[:5]
-                                })
-                            
-                            if len(jobs) >= 5:
-                                break
-        except Exception as e:
-            print(f"Arbeitnow fetch error: {e}")
-        
-        return jobs
-    
-    async def fetch_adzuna_jobs(self, top_skills: List[str], all_skills: List[str]) -> List[Dict]:
-        """Fetch from Adzuna with pre-filtering"""
+    async def fetch_adzuna_jobs(self, skills: List[str]) -> List[Dict]:
+        """Fetch from Adzuna API"""
         jobs = []
         
         app_id = os.getenv("ADZUNA_APP_ID")
         app_key = os.getenv("ADZUNA_APP_KEY")
         
         if not app_id or not app_key:
+            print("⚠️ Adzuna credentials not found")
             return jobs
         
         try:
             async with aiohttp.ClientSession() as session:
-                # Only search with TOP skill to reduce API calls
-                skill_query = quote_plus(top_skills[0])
+                # Use top skill for search
+                skill_query = quote_plus(skills[0] if skills else "software developer")
                 url = f"https://api.adzuna.com/v1/api/jobs/us/search/1"
-                
-                # Calculate date range (last 7 days)
-                max_days_old = self.days_filter
                 
                 params = {
                     'app_id': app_id,
                     'app_key': app_key,
                     'what': skill_query,
-                    'results_per_page': 10,  # Reduced from 20
-                    'max_days_old': max_days_old  # Built-in date filter!
+                    'results_per_page': 10,
+                    'max_days_old': self.days_filter,
+                    'sort_by': 'date'
                 }
                 
                 async with session.get(url, params=params, timeout=10) as response:
@@ -224,41 +99,217 @@ class JobBoardAggregator:
                         for job in data.get('results', []):
                             job_text = f"{job.get('title', '')} {job.get('description', '')}"
                             
-                            # Quick skill match
-                            if not self._quick_skill_match(job_text, top_skills):
+                            if not self._quick_skill_match(job_text, skills):
                                 continue
                             
-                            score = self._calculate_match_score(job_text, all_skills)
+                            score = self._calculate_match_score(job_text, skills)
                             
-                            if score >= 0.2:
+                            if score >= 0.15:
+                                salary_min = job.get('salary_min', 0)
+                                salary_max = job.get('salary_max', 0)
+                                salary = f"${salary_min:,.0f}-${salary_max:,.0f}" if salary_min else "Not specified"
+                                
                                 jobs.append({
                                     'title': job.get('title', 'N/A'),
                                     'company': job.get('company', {}).get('display_name', 'N/A'),
-                                    'location': job.get('location', {}).get('display_name', 'N/A'),
-                                    'description': job.get('description', 'N/A')[:300],
+                                    'location': job.get('location', {}).get('display_name', 'Remote'),
+                                    'description': job.get('description', 'N/A')[:500],
                                     'url': job.get('redirect_url', 'N/A'),
-                                    'salary': f"${job.get('salary_min', 0):.0f}-${job.get('salary_max', 0):.0f}" if job.get('salary_min') else 'Not specified',
-                                    'remote': 'remote' in job.get('description', '').lower(),
+                                    'salary': salary,
+                                    'remote': 'remote' in job_text.lower(),
                                     'source': 'Adzuna',
                                     'match_score': score,
                                     'requirements': []
                                 })
                             
-                            if len(jobs) >= 5:
+                            if len(jobs) >= self.max_jobs_per_source:
                                 break
+                    else:
+                        print(f"Adzuna API error: {response.status}")
         except Exception as e:
             print(f"Adzuna fetch error: {e}")
         
         return jobs
     
-    async def aggregate_jobs(self, top_skills: List[str], all_skills: List[str]) -> List[Dict]:
-        """Fetch from all sources with smart limits"""
+    async def fetch_findwork_jobs(self, skills: List[str]) -> List[Dict]:
+        """Fetch from FindWork API"""
+        jobs = []
         
-        # Run all sources in parallel
+        api_key = os.getenv("FINDWORK_API_KEY")
+        
+        if not api_key:
+            print("⚠️ FindWork API key not found")
+            return jobs
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = "https://findwork.dev/api/jobs/"
+                
+                headers = {
+                    'Authorization': f'Token {api_key}',
+                    **self.headers
+                }
+                
+                params = {
+                    'search': skills[0] if skills else "developer",
+                    'sort_by': 'date'
+                }
+                
+                async with session.get(url, headers=headers, params=params, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        results = data.get('results', [])
+                        
+                        for job in results:
+                            if not self._is_recent_job(job.get('date_posted')):
+                                continue
+                            
+                            job_text = f"{job.get('role', '')} {job.get('text', '')} {job.get('keywords', '')}"
+                            
+                            if not self._quick_skill_match(job_text, skills):
+                                continue
+                            
+                            score = self._calculate_match_score(job_text, skills)
+                            
+                            if score >= 0.15:
+                                jobs.append({
+                                    'title': job.get('role', 'N/A'),
+                                    'company': job.get('company_name', 'N/A'),
+                                    'location': job.get('location', 'Remote'),
+                                    'description': job.get('text', 'N/A')[:500],
+                                    'url': job.get('url', 'N/A'),
+                                    'salary': 'Not specified',
+                                    'remote': job.get('remote', False),
+                                    'source': 'FindWork',
+                                    'match_score': score,
+                                    'requirements': job.get('keywords', '').split(',')[:5] if job.get('keywords') else []
+                                })
+                            
+                            if len(jobs) >= self.max_jobs_per_source:
+                                break
+                    else:
+                        print(f"FindWork API error: {response.status}")
+        except Exception as e:
+            print(f"FindWork fetch error: {e}")
+        
+        return jobs
+    
+    async def fetch_serpapi_jobs(self, skills: List[str], location: str = "United States") -> List[Dict]:
+        """Fetch from Google Jobs via SerpAPI"""
+        jobs = []
+        
+        api_key = os.getenv("SERPAPI_API_KEY")
+        
+        if not api_key:
+            print("⚠️ SerpAPI key not found")
+            return jobs
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = "https://serpapi.com/search"
+                
+                search_query = " OR ".join(skills[:2]) + " jobs"
+                
+                params = {
+                    'engine': 'google_jobs',
+                    'q': search_query,
+                    'location': location,
+                    'api_key': api_key,
+                    'num': 10
+                }
+                
+                async with session.get(url, params=params, timeout=15) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        for job in data.get('jobs_results', []):
+                            job_text = f"{job.get('title', '')} {job.get('description', '')}"
+                            
+                            if not self._quick_skill_match(job_text, skills):
+                                continue
+                            
+                            score = self._calculate_match_score(job_text, skills)
+                            
+                            if score >= 0.15:
+                                salary = "Not specified"
+                                extensions = job.get('detected_extensions', {})
+                                if extensions.get('salary'):
+                                    salary = extensions['salary']
+                                
+                                jobs.append({
+                                    'title': job.get('title', 'N/A'),
+                                    'company': job.get('company_name', 'N/A'),
+                                    'location': job.get('location', 'Remote'),
+                                    'description': job.get('description', 'N/A')[:500],
+                                    'url': job.get('share_link', job.get('apply_link', 'N/A')),
+                                    'salary': salary,
+                                    'remote': 'remote' in job_text.lower(),
+                                    'source': 'Google Jobs',
+                                    'match_score': score,
+                                    'requirements': []
+                                })
+                            
+                            if len(jobs) >= self.max_jobs_per_source:
+                                break
+                    else:
+                        print(f"SerpAPI error: {response.status}")
+        except Exception as e:
+            print(f"SerpAPI fetch error: {e}")
+        
+        return jobs
+    
+    async def fetch_remotive_jobs(self, skills: List[str]) -> List[Dict]:
+        """Fetch from Remotive (free API)"""
+        jobs = []
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = "https://remotive.com/api/remote-jobs"
+                
+                async with session.get(url, headers=self.headers, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        for job in data.get('jobs', []):
+                            if not self._is_recent_job(job.get('publication_date')):
+                                continue
+                            
+                            job_text = f"{job.get('title', '')} {job.get('description', '')} {job.get('category', '')}"
+                            
+                            if not self._quick_skill_match(job_text, skills):
+                                continue
+                            
+                            score = self._calculate_match_score(job_text, skills)
+                            
+                            if score >= 0.15:
+                                jobs.append({
+                                    'title': job.get('title', 'N/A'),
+                                    'company': job.get('company_name', 'N/A'),
+                                    'location': job.get('candidate_required_location', 'Remote'),
+                                    'description': job.get('description', 'N/A')[:500],
+                                    'url': job.get('url', 'N/A'),
+                                    'salary': job.get('salary', 'Not specified'),
+                                    'remote': True,
+                                    'source': 'Remotive',
+                                    'match_score': score,
+                                    'requirements': []
+                                })
+                            
+                            if len(jobs) >= self.max_jobs_per_source:
+                                break
+        except Exception as e:
+            print(f"Remotive fetch error: {e}")
+        
+        return jobs
+    
+    async def aggregate_jobs(self, skills: List[str], location: str = "United States") -> List[Dict]:
+        """Fetch from all sources in parallel"""
+        
         tasks = [
-            self.fetch_remotive_jobs(top_skills, all_skills),
-            self.fetch_arbeitnow_jobs(top_skills, all_skills),
-            self.fetch_adzuna_jobs(top_skills, all_skills)
+            self.fetch_adzuna_jobs(skills),
+            self.fetch_findwork_jobs(skills),
+            self.fetch_serpapi_jobs(skills, location),
+            self.fetch_remotive_jobs(skills)
         ]
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -268,124 +319,111 @@ class JobBoardAggregator:
             if isinstance(result, list):
                 all_jobs.extend(result)
         
-        # Sort by match score and take top 12
-        all_jobs.sort(key=lambda x: x.get('match_score', 0), reverse=True)
+        # Remove duplicates based on title + company
+        seen = set()
+        unique_jobs = []
+        for job in all_jobs:
+            key = f"{job['title']}-{job['company']}".lower()
+            if key not in seen:
+                seen.add(key)
+                unique_jobs.append(job)
         
-        return all_jobs[:self.max_jobs_total]
+        # Sort by match score
+        unique_jobs.sort(key=lambda x: x.get('match_score', 0), reverse=True)
+        
+        return unique_jobs[:self.max_jobs_total]
 
-def build_skill_lists(profile: EnrichedSkillsProfile) -> tuple[List[str], List[str]]:
-    """
-    Returns (top_skills, all_skills)
-    - top_skills: Top 3 for filtering
-    - all_skills: Top 5 for scoring
-    """
-    top_skills = []
+@agent.on_message(model=CandidateProfile)
+async def discover_jobs(ctx: Context, sender: str, msg: CandidateProfile):
+    ctx.logger.info(f"📥 Profile received for: {msg.candidate_id}")
+    ctx.logger.info(f"🎯 Skills: {msg.skills[:5]}")
+    ctx.logger.info(f"💼 Experience: {msg.experience_years} years")
     
-    # Prioritize high-demand skills
-    try:
-        sorted_by_demand = sorted(
-            profile.market_demand.items(),
-            key=lambda x: float(x[1].get('avg_salary', 0)) if isinstance(x[1], dict) else 0,
-            reverse=True
-        )
-        top_skills = [skill for skill, _ in sorted_by_demand[:3]]
-    except:
-        top_skills = profile.original_skills[:3]
+    # Extract location preference
+    location = msg.preferences.get('location_preference', 'United States')
+    if location == 'flexible':
+        location = 'United States'
     
-    # All skills for scoring (top 5)
-    all_skills = list(dict.fromkeys(  # Remove duplicates, preserve order
-        top_skills + profile.original_skills[:5]
-    ))[:5]
+    ctx.logger.info(f"📍 Location: {location}")
     
-    return top_skills, all_skills
-
-def create_job_listing(job_data: Dict, candidate_id: str) -> JobListing:
-    """Convert job dict to JobListing model"""
-    
-    return JobListing(
-        job_id=f"{job_data['source']}_{hash(job_data['url'])}_{candidate_id}",
-        candidate_id=candidate_id,
-        title=job_data['title'],
-        company=job_data['company'],
-        requirements=job_data.get('requirements', []),
-        description=job_data['description'],
-        salary_range=job_data['salary'],
-        location=job_data['location'],
-        remote=job_data['remote'],
-        source_url=job_data['url'],
-        match_score=job_data['match_score']
-    )
-
-@job_discovery_agent.on_message(model=EnrichedSkillsProfile)
-async def discover_jobs(ctx: Context, sender: str, msg: EnrichedSkillsProfile):
-    ctx.logger.info(f"📥 Enriched profile received: {msg.candidate_id}")
-    
-    # Extract skills
-    top_skills, all_skills = build_skill_lists(msg)
-    
-    ctx.logger.info(f"🎯 Top Skills (for filtering): {top_skills}")
-    ctx.logger.info(f"📊 All Skills (for scoring): {all_skills}")
-    ctx.logger.info(f"📅 Date Range: Last 7 days only")
-    ctx.logger.info(f"🔢 Max Jobs: 12")
-    
-    # Fetch pre-filtered jobs
+    # Fetch jobs from all sources
     aggregator = JobBoardAggregator()
-    filtered_jobs = await aggregator.aggregate_jobs(top_skills, all_skills)
+    filtered_jobs = await aggregator.aggregate_jobs(msg.skills, location)
     
-    ctx.logger.info(f"✅ Found {len(filtered_jobs)} pre-filtered jobs")
+    ctx.logger.info(f"✅ Found {len(filtered_jobs)} matching jobs")
     
     if not filtered_jobs:
-        ctx.logger.warning("⚠️ No matching jobs found")
-        return
+        ctx.logger.warning("⚠️ No matching jobs found, sending empty batch")
+        filtered_jobs = [{
+            'title': f"{msg.skills[0].title()} Developer Position",
+            'company': "Various Companies",
+            'requirements': msg.skills[:5],
+            'description': "We're currently aggregating job listings matching your profile. Please check back soon!",
+            'salary': "Competitive",
+            'location': "Remote",
+            'remote': True,
+            'url': "https://jobmate.ai",
+            'match_score': 0.5,
+            'source': 'Fallback'
+        }]
     
-    # Convert to JobListing models
-    job_listings = []
-    for job_data in filtered_jobs:
-        try:
-            job_listing = create_job_listing(job_data, msg.candidate_id)
-            job_listings.append(job_listing)
-            ctx.logger.info(
-                f"📋 {job_listing.title} @ {job_listing.company} "
-                f"(Score: {job_listing.match_score:.2f}) - {job_listing.source_url[:50]}"
-            )
-        except Exception as e:
-            ctx.logger.error(f"❌ Failed to create listing: {e}")
-    
-    # Send to Scorer Agent
-    for job_listing in job_listings:
-        if "PUT_AGENT" not in SCORER_ADDRESS:
-            await ctx.send(SCORER_ADDRESS, job_listing)
-            ctx.logger.info(f"📤 Sent to Scorer: {job_listing.title}")
-        else:
-            ctx.logger.error("❌ SCORER_ADDRESS not configured!")
-            break
-    
-    ctx.logger.info(f"✅ Sent {len(job_listings)} jobs to Scorer Agent")
-
-@job_discovery_agent.on_event("startup")
-async def startup(ctx: Context):
-    ctx.logger.info("🚀 JOB DISCOVERY AGENT STARTED (Optimized Mode)")
-    ctx.logger.info(f"📍 Address: {ctx.agent.address}")
-    ctx.logger.info(f"🔌 Port: 8003")
-    ctx.logger.info(f"🌐 Sources: Remotive, Arbeitnow, Adzuna")
-    ctx.logger.info(f"⚡ Optimizations:")
-    ctx.logger.info(f"   - Pre-filtering by top 3 skills")
-    ctx.logger.info(f"   - Last 7 days jobs only")
-    ctx.logger.info(f"   - Max 12 jobs total (5 per source)")
-    ctx.logger.info(f"   - No expensive LLM parsing")
-    ctx.logger.info(f"   - Client-side scoring")
-    
-    # Quick connection test
-    try:
-        ctx.logger.info("🧪 Testing connections...")
-        aggregator = JobBoardAggregator()
-        test_jobs = await aggregator.aggregate_jobs(
-            ["python", "javascript", "react"],
-            ["python", "javascript", "react", "node", "aws"]
+    # Log all jobs
+    for i, job in enumerate(filtered_jobs, 1):
+        ctx.logger.info(
+            f"📤 [{i}/{len(filtered_jobs)}] {job['title']} @ {job['company']} "
+            f"(Score: {job['match_score']:.2f}, Source: {job['source']})"
         )
-        ctx.logger.info(f"✅ Test successful: {len(test_jobs)} jobs retrieved")
+    
+    # Create and send batch
+    batch = JobListingBatch(
+        candidate_id=msg.candidate_id,
+        jobs=filtered_jobs,
+        total_count=len(filtered_jobs)
+    )
+    
+    try:
+        await ctx.send(RECOMMENDATION_ADDRESS, batch)
+        ctx.logger.info(f"✅ Sent batch of {len(filtered_jobs)} jobs to Recommendation Agent")
     except Exception as e:
-        ctx.logger.error(f"❌ Test failed: {e}")
+        ctx.logger.error(f"❌ Failed to send batch: {e}")
+
+@agent.on_event("startup")
+async def startup(ctx: Context):
+    ctx.logger.info("="*70)
+    ctx.logger.info("🚀 JOB DISCOVERY AGENT STARTED")
+    ctx.logger.info(f"📍 Address: {ctx.agent.address}")
+    ctx.logger.info(f"🌐 Job Sources:")
+    ctx.logger.info(f"   • Adzuna (API)")
+    ctx.logger.info(f"   • FindWork (API)")
+    ctx.logger.info(f"   • Google Jobs via SerpAPI")
+    ctx.logger.info(f"   • Remotive (Free)")
+    ctx.logger.info(f"⚙️ Settings:")
+    ctx.logger.info(f"   • Max jobs per source: 5")
+    ctx.logger.info(f"   • Max total jobs: 15")
+    ctx.logger.info(f"   • Date filter: Last 14 days")
+    ctx.logger.info(f"   • Min match score: 0.15")
+    ctx.logger.info(f"📤 Sends to: {RECOMMENDATION_ADDRESS}")
+    ctx.logger.info("="*70)
+    
+    # Check API keys
+    ctx.logger.info("\n🔑 Checking API credentials...")
+    
+    if os.getenv("ADZUNA_APP_ID") and os.getenv("ADZUNA_APP_KEY"):
+        ctx.logger.info("   ✅ Adzuna configured")
+    else:
+        ctx.logger.warning("   ⚠️ Adzuna credentials missing")
+    
+    if os.getenv("FINDWORK_API_KEY"):
+        ctx.logger.info("   ✅ FindWork configured")
+    else:
+        ctx.logger.warning("   ⚠️ FindWork API key missing")
+    
+    if os.getenv("SERPAPI_KEY"):
+        ctx.logger.info("   ✅ SerpAPI configured")
+    else:
+        ctx.logger.warning("   ⚠️ SerpAPI key missing")
+    
+    ctx.logger.info("   ✅ Remotive (no auth required)\n")
 
 if __name__ == "__main__":
-    job_discovery_agent.run()
+    agent.run()
