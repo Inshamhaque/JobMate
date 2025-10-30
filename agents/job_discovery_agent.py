@@ -5,14 +5,13 @@ import asyncio
 from typing import List, Dict
 from urllib.parse import quote_plus
 from datetime import datetime, timedelta
+from models import CandidateProfile, JobListingBatch, ErrorReport
 
-# Import models from your models.py file
-from models import CandidateProfile, JobListingBatch
-
-# 🔗 Replace with actual Recommendation Agent address
+# Agentverse Agent id 
 RECOMMENDATION_ADDRESS = "agent1q2g24508ufjrlcusjxk7cmg53f7udtu4a49a5e76zfj77x207sj5us5xwt6"
+CANDIDATE_AGENT_ADDRESS = "agent1q08kycnalue0xwhgl888cwlaxlfaqmyyfmzrlvqqpd38c9xh57hlgk893l8"
 
-# Initialize Agent for Agentverse
+
 agent = Agent()
 
 class JobBoardAggregator:
@@ -24,7 +23,7 @@ class JobBoardAggregator:
         }
         self.max_jobs_per_source = 5
         self.max_jobs_total = 15
-        self.days_filter = 14  # Last 14 days
+        self.days_filter = 14 
     
     def _is_recent_job(self, date_str: str) -> bool:
         """Check if job was posted in last 14 days"""
@@ -47,7 +46,7 @@ class JobBoardAggregator:
         """Check if ANY skill matches"""
         job_text_lower = job_text.lower()
         
-        for skill in skills[:5]:  # Check top 5 skills
+        for skill in skills[:5]:
             if skill.lower() in job_text_lower:
                 return True
         return False
@@ -60,7 +59,6 @@ class JobBoardAggregator:
         
         for i, skill in enumerate(skills[:5]):
             if skill.lower() in job_text_lower:
-                # Top 3 skills get higher weight
                 weight = 0.25 if i < 3 else 0.15
                 matches += weight
         
@@ -79,7 +77,6 @@ class JobBoardAggregator:
         
         try:
             async with aiohttp.ClientSession() as session:
-                # Use top skill for search
                 skill_query = quote_plus(skills[0] if skills else "software developer")
                 url = f"https://api.adzuna.com/v1/api/jobs/us/search/1"
                 
@@ -259,7 +256,7 @@ class JobBoardAggregator:
         return jobs
     
     async def fetch_remotive_jobs(self, skills: List[str]) -> List[Dict]:
-        """Fetch from Remotive (free API)"""
+        """Fetch from Remotive"""
         jobs = []
         
         try:
@@ -338,19 +335,26 @@ async def discover_jobs(ctx: Context, sender: str, msg: CandidateProfile):
     ctx.logger.info(f"📥 Profile received for: {msg.candidate_id}")
     ctx.logger.info(f"🎯 Skills: {msg.skills[:5]}")
     ctx.logger.info(f"💼 Experience: {msg.experience_years} years")
-    
-    # Extract location preference
+
+    # to handle the state if there was no skill found, maybe 
+    skills_fetched = msg.skills[:5]
+    if len(skills_fetched)<1 :
+        errorReport = ErrorReport(
+            candidate_id=msg.candidate_id,
+            content="Error fetching jobs, try sending a more structured resume"
+        )
+        await ctx.send(CANDIDATE_AGENT_ADDRESS,errorReport)
+
     location = msg.preferences.get('location_preference', 'United States')
     if location == 'flexible':
         location = 'United States'
     
-    ctx.logger.info(f"📍 Location: {location}")
+    ctx.logger.info(f" Location: {location}")
     
-    # Fetch jobs from all sources
     aggregator = JobBoardAggregator()
     filtered_jobs = await aggregator.aggregate_jobs(msg.skills, location)
     
-    ctx.logger.info(f"✅ Found {len(filtered_jobs)} matching jobs")
+    ctx.logger.info(f"Found {len(filtered_jobs)} matching jobs")
     
     if not filtered_jobs:
         ctx.logger.warning("⚠️ No matching jobs found, sending empty batch")

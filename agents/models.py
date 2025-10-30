@@ -34,6 +34,9 @@ class JobListingBatch(Model):
     jobs: list  # List of job dictionaries
     total_count: int
 
+class ErrorReport(Model):
+    candidate_id: str
+    content : str
 
 class PDFResume(Model):
     """PDF resume upload"""

@@ -2,7 +2,8 @@ from datetime import datetime
 from uuid import uuid4
 from uagents import Agent, Context, Protocol
 import re
-from models import CandidateProfile, RecommendationReport
+from models import CandidateProfile, RecommendationReport, ErrorReport
+import os 
 
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
@@ -23,40 +24,70 @@ user_sessions = {}
 
 # ---------------------- Utility functions ----------------------
 
-def extract_skills_from_text(text: str) -> list:
-    """Extract technical skills from text"""
+import re
+from typing import List
+from langchain.chat_models import ChatOpenAI
+from langchain.schema import SystemMessage, HumanMessage
+
+
+def extract_skills_from_text(text: str) -> List[str]:
+    """
+    Extract technical skills from resume text using LangChain LLM.
+    Falls back to keyword-based extraction if LLM is unavailable.
+    """
+
+    # --- 1️⃣ Base skill list for fallback detection ---
     skill_keywords = [
-        "python", "java", "javascript", "react", "node.js", "nodejs", "angular", "vue.js", "vue",
-        "django", "flask", "fastapi", "spring", "express", "typescript",
+        "python", "java", "javascript", "typescript", "react", "node.js", "nodejs", "angular", "vue",
+        "django", "flask", "fastapi", "springboot", "spring", "express", "next.js", "nuxt.js",
         "aws", "azure", "gcp", "docker", "kubernetes", "terraform", "ansible",
         "machine learning", "deep learning", "data science", "ai", "ml",
-        "tensorflow", "pytorch", "scikit-learn", "pandas", "numpy",
+        "tensorflow", "pytorch", "scikit-learn", "pandas", "numpy", "matplotlib", "seaborn",
         "sql", "postgresql", "mysql", "mongodb", "redis", "elasticsearch",
         "ci/cd", "jenkins", "github actions", "gitlab", "agile", "scrum",
-        "html", "css", "tailwind", "bootstrap", "sass", "git", "rest api", "restful",
-        "graphql", "microservices", "linux", "devops", "springboot", "kafka",
-        "rabbitmq", "nginx", "apache", "bash", "shell", "powershell",
-        "c++", "c#", "go", "golang", "rust", "php", "ruby", "rails",
-        "frontend", "backend", "fullstack", "full-stack", "cloud"
+        "html", "css", "tailwind", "bootstrap", "sass", "git", "rest api", "graphql",
+        "microservices", "linux", "devops", "springboot", "kafka", "rabbitmq",
+        "nginx", "bash", "shell", "powershell", "c++", "c#", "go", "golang", "rust",
+        "php", "ruby", "rails", "frontend", "backend", "fullstack", "cloud", "docker compose"
     ]
-    
+
     text_lower = text.lower()
-    found_skills = []
-    
-    # Direct skill matching
-    for skill in skill_keywords:
-        if skill in text_lower:
-            found_skills.append(skill)
-    
-    # Extract quoted skills
-    import re
-    quoted = re.findall(r'["\']([^"\']+)["\']', text)
-    for item in quoted:
-        item_lower = item.lower().strip()
-        if item_lower and len(item_lower) > 2:
-            found_skills.append(item_lower)
-    
-    return list(set(found_skills))
+    found_skills = [skill for skill in skill_keywords if skill in text_lower]
+
+    # --- 2️⃣ LangChain LLM Extraction ---
+    try:
+        llm = ChatOpenAI(
+        model_name="gpt-4o-mini",
+        temperature=0,
+        openai_api_key=os.getenv("OPENAI_API_KEY")
+        )
+        messages = [
+            SystemMessage(
+                content="You are an expert resume parser. Extract only technical skills, frameworks, programming languages, or tools mentioned in the text. Return them as a JSON list of lowercase strings."
+            ),
+            HumanMessage(content=text)
+        ]
+
+        response = llm(messages)
+        content = response.content.strip()
+
+        # Extract quoted items or JSON array
+        ai_skills = re.findall(r'"([^"]+)"', content)
+        if not ai_skills:
+            ai_skills = re.findall(r"'([^']+)'", content)
+        if not ai_skills and content.startswith("["):
+            ai_skills = re.findall(r"[a-zA-Z0-9+\-#\.]+", content)
+
+        combined_skills = list(set(found_skills + ai_skills))
+
+    except Exception as e:
+        print(f"[extract_skills_from_text] LangChain LLM fallback: {e}")
+        combined_skills = found_skills
+
+    # --- 3️⃣ Clean and normalize ---
+    combined_skills = [s.strip().lower() for s in combined_skills if len(s) > 1]
+    return sorted(list(set(combined_skills)))
+
 
 def extract_experience_years(text: str) -> int:
     """Extract years of experience from text"""
@@ -83,14 +114,51 @@ def is_resume_text(text: str) -> bool:
     matches = sum(1 for indicator in resume_indicators if indicator in text_lower)
     return matches >= 2 or len(text) > 200
 
+
+
+def extract_work_location(text: str) -> str:
+    """Detect the preferred work location from resume text. Defaults to 'remote'."""
+    text_lower = text.lower()
+
+    patterns = {
+        "remote": [
+            r"\bremote\b",
+            r"work\s*from\s*home",
+            r"telecommute",
+            r"virtually",
+            r"off-site",
+        ],
+        "hybrid": [
+            r"\bhybrid\b",
+            r"partly\s*remote",
+            r"flexible\s*work",
+            r"mix(ed)?\s*(remote|office)",
+        ],
+        "onsite": [
+            r"\bonsite\b",
+            r"on[-\s]*premise",
+            r"office\s*based",
+            r"client\s*location",
+        ],
+    }
+
+    for location, regex_list in patterns.items():
+        for regex in regex_list:
+            if re.search(regex, text_lower):
+                return location
+
+    return "remote"
+
+
 def create_profile_from_input(text: str, sender: str) -> CandidateProfile:
     """Create candidate profile from any input"""
     skills = extract_skills_from_text(text)
     experience_years = extract_experience_years(text)
+    location = extract_work_location(text)
     
-    # If no skills found but text mentions looking for jobs, use general search
+    # If no skills found, then send the response here only
     if not skills:
-        skills = ["software developer", "programming"]
+        return None
     
     profile = CandidateProfile(
         candidate_id=sender,
@@ -101,7 +169,8 @@ def create_profile_from_input(text: str, sender: str) -> CandidateProfile:
             "remote": "remote" in text.lower() or "wfh" in text.lower(),
             "salary_min": 80000,
             "location_preference": "flexible"
-        }
+        },
+        location=location
     )
     return profile
 
@@ -132,7 +201,7 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     ctx.logger.info(f"📝 Text received ({len(text)} chars): {text[:100]}...")
     
     # Handle empty or very short messages
-    if len(text) < 10:
+    if len(text) < 30:
         await ctx.send(
             sender,
             ChatMessage(
@@ -159,6 +228,9 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         ctx.logger.info(f"🧠 Processing profile for {sender}...")
         profile = create_profile_from_input(text, sender)
         
+        if profile is None :
+            await ctx.send(sender,"Please send the correct skillset or a parseable resume")
+            return 
         # Store session
         user_sessions[sender] = {
             'profile': profile,
@@ -251,6 +323,30 @@ async def handle_recommendation(ctx: Context, sender: str, msg: RecommendationRe
         ctx.logger.info(f"✅ Sent recommendations to {msg.candidate_id}")
     except Exception as e:
         ctx.logger.error(f"Error sending recommendations: {e}")
+
+@agent.on_message(model=ErrorReport)
+async def handle_errors(ctx:Context, sender : str, msg:ErrorReport):
+    """ Handle errors if the skills donot match any job listing """
+    ctx.logger.info(f"Some error occurred in the job discovery phase")
+    try:
+        await ctx.send(
+            msg.candidate_id,
+            ChatMessage(
+                timestamp=datetime.utcnow(),
+                msg_id=uuid4(),
+                content=[
+                    TextContent(
+                        type="text",
+                        text=f"Error in finding jobs:\n\n{msg.content}"
+                    ),
+                    EndSessionContent(type="end-session"),
+                ]
+            )
+        )   
+    except Exception as e:
+        ctx.logger.error(f"Error contacting with the agent: {e}")
+    
+
 
 @agent.on_event("startup")
 async def startup(ctx: Context):
