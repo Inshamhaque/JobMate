@@ -1,4 +1,10 @@
 from uagents import Model
+from enum import Enum
+
+class Worklocation(str,Enum):
+    remote = "remote"
+    onsite = "onsite"
+    hybrid = "hybrid"
 
 class CandidateProfile(Model):
     """Profile extracted from resume - sent from Candidate to Job Discovery"""
@@ -7,6 +13,7 @@ class CandidateProfile(Model):
     skills: list
     experience_years: int
     preferences: dict
+    location : Worklocation
 
 class JobListing(Model):
     """Individual job - sent from Job Discovery to Recommendation"""
