@@ -4,6 +4,11 @@ from uagents import Agent, Context, Protocol
 import re
 from models import CandidateProfile, RecommendationReport, ErrorReport
 import os 
+from config.agent_addresses import JOB_DISCOVERY_ADDRESS
+import re
+from typing import List
+from langchain.chat_models import ChatOpenAI
+from langchain.schema import SystemMessage, HumanMessage
 
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
@@ -13,22 +18,8 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 
-# 🔗 Replace this with the actual Job Discovery agent address
-JOB_DISCOVERY_ADDRESS = "agent1qd8vlyl2wte96ktqxl4uvhqac3m5uq2ag999qe0fhvr5qzywv0k9720yjmz"
-
-# For Agentverse Hosted Agent
 agent = Agent()
-
-# Storage for conversation state
 user_sessions = {}
-
-# ---------------------- Utility functions ----------------------
-
-import re
-from typing import List
-from langchain.chat_models import ChatOpenAI
-from langchain.schema import SystemMessage, HumanMessage
-
 
 def extract_skills_from_text(text: str) -> List[str]:
     """
@@ -36,7 +27,6 @@ def extract_skills_from_text(text: str) -> List[str]:
     Falls back to keyword-based extraction if LLM is unavailable.
     """
 
-    # --- 1️⃣ Base skill list for fallback detection ---
     skill_keywords = [
         "python", "java", "javascript", "typescript", "react", "node.js", "nodejs", "angular", "vue",
         "django", "flask", "fastapi", "springboot", "spring", "express", "next.js", "nuxt.js",
@@ -54,7 +44,6 @@ def extract_skills_from_text(text: str) -> List[str]:
     text_lower = text.lower()
     found_skills = [skill for skill in skill_keywords if skill in text_lower]
 
-    # --- 2️⃣ LangChain LLM Extraction ---
     try:
         llm = ChatOpenAI(
         model_name="gpt-4o-mini",
@@ -71,7 +60,6 @@ def extract_skills_from_text(text: str) -> List[str]:
         response = llm(messages)
         content = response.content.strip()
 
-        # Extract quoted items or JSON array
         ai_skills = re.findall(r'"([^"]+)"', content)
         if not ai_skills:
             ai_skills = re.findall(r"'([^']+)'", content)
@@ -84,7 +72,6 @@ def extract_skills_from_text(text: str) -> List[str]:
         print(f"[extract_skills_from_text] LangChain LLM fallback: {e}")
         combined_skills = found_skills
 
-    # --- 3️⃣ Clean and normalize ---
     combined_skills = [s.strip().lower() for s in combined_skills if len(s) > 1]
     return sorted(list(set(combined_skills)))
 
@@ -100,7 +87,7 @@ def extract_experience_years(text: str) -> int:
         match = re.search(pattern, text.lower())
         if match:
             return int(match.group(1))
-    return 3  # Default experience
+    return 3  
 
 def is_resume_text(text: str) -> bool:
     """Detect if text is a resume"""
@@ -156,7 +143,6 @@ def create_profile_from_input(text: str, sender: str) -> CandidateProfile:
     experience_years = extract_experience_years(text)
     location = extract_work_location(text)
     
-    # If no skills found, then send the response here only
     if not skills:
         return None
     
@@ -174,7 +160,6 @@ def create_profile_from_input(text: str, sender: str) -> CandidateProfile:
     )
     return profile
 
-# ---------------------- Chat Protocol ----------------------
 chat_proto = Protocol(spec=chat_protocol_spec)
 
 @chat_proto.on_message(ChatMessage)
@@ -182,7 +167,6 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     """Handle incoming chat messages"""
     ctx.logger.info(f"📨 Message from {sender}")
     
-    # Always acknowledge first
     await ctx.send(
         sender,
         ChatAcknowledgement(
@@ -191,7 +175,6 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         ),
     )
     
-    # Collect text content
     text = ''
     for item in msg.content:
         if isinstance(item, TextContent):
@@ -200,7 +183,6 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     text = text.strip()
     ctx.logger.info(f"📝 Text received ({len(text)} chars): {text[:100]}...")
     
-    # Handle empty or very short messages
     if len(text) < 30:
         await ctx.send(
             sender,
@@ -223,7 +205,6 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         )
         return
     
-    # Process the input
     try:
         ctx.logger.info(f"🧠 Processing profile for {sender}...")
         profile = create_profile_from_input(text, sender)
@@ -231,7 +212,7 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         if profile is None :
             await ctx.send(sender,"Please send the correct skillset or a parseable resume")
             return 
-        # Store session
+        
         user_sessions[sender] = {
             'profile': profile,
             'timestamp': datetime.now()
@@ -239,10 +220,8 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         
         ctx.logger.info(f"✅ Profile created - Skills: {profile.skills}, Experience: {profile.experience_years}y")
         
-        # Send to Job Discovery Agent
         await ctx.send(JOB_DISCOVERY_ADDRESS, profile)
         
-        # Determine response based on input type
         if is_resume_text(text):
             response_text = (
                 f"✅ Resume processed successfully!\n\n"
@@ -295,10 +274,9 @@ async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
     """Handle acknowledgements"""
     ctx.logger.info(f"✅ Ack from {sender}")
 
-# Include protocol
+# Chat protocol for interacting with the ASI:one chat
 agent.include(chat_proto, publish_manifest=True)
 
-# ---------------------- Recommendation Handler ----------------------
 
 @agent.on_message(model=RecommendationReport)
 async def handle_recommendation(ctx: Context, sender: str, msg: RecommendationReport):
